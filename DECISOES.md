@@ -47,13 +47,14 @@ O motor (`src/engine`) não importa nada de fora da própria pasta, nem usa `pro
 | `Rede`       | id, nome, premissas (JSON), criadoEm | 1 conta = 1 rede (multi-tenant básico) |
 | `Usuario`    | id, email (único), senhaHash, redeId | e-mail + senha (bcrypt) |
 | `Sessao`     | id, token (único), usuarioId, expiraEm | cookie httpOnly, 30 dias |
-| `Unidade`    | id, redeId, nome, horarios (JSON), horarioReduzido (JSON, opcional), cobertura (JSON) | nome único por rede |
-| `Cargo`      | id, unidadeId, nome, quantidade, salarioBase (Decimal), jornadaSemanal | "quadro atual" |
+| `Unidade`    | id, redeId, nome, bandeira, regional, horarios (JSON), horarioReduzido (JSON, opcional), cobertura (JSON), pico (JSON, opcional) | nome único por rede |
+| `Cargo`      | id, unidadeId, nome, setor (opcional), quantidade, salarioBase (Decimal), jornadaSemanal | "quadro atual" |
 
 Formato dos JSON (os mesmos tipos do motor, `src/engine/tipos.ts`):
 
 - `horarios`: `{ seg: { abre: "08:00", fecha: "22:00" } | null, ter: ..., dom: ... }`
-- `cobertura`: `{ seg: [ { inicio: "08:00", fim: "12:00", pessoas: 2 }, ... ], ... }`
+- `cobertura`: `{ seg: [ { inicio: "08:00", fim: "12:00", pessoas: 2, setor: "Caixa" }, ... ], ... }` (`setor` opcional, D-32)
+- `pico`: `{ descricao: "Natal", horarios: {...}, cobertura: {...} }` ou `null` (D-33)
 - `premissas`: ver `Premissas` em `tipos.ts`.
 
 Toda tabela filha usa `onDelete: Cascade` a partir da `Rede`, para que a exclusão a pedido (LGPD)
@@ -86,15 +87,16 @@ Fase 2 = +12 meses após a fase 1 = **15/12/2027**. Contagem de prazo (inclusão
 configuração legal e podem ser sobrescritos nas premissas da rede. Sinalizados na interface como
 premissa a validar com o jurídico.
 
-**D-07 — Cobertura agregada, não por cargo.** A cobertura mínima é de "pessoas", sem distinguir cargo.
-Todo o quadro da unidade conta para cobri-la. Cobertura por cargo fica fora do MVP.
+**D-07 — Cobertura agregada, não por cargo.** *Substituída pela D-32.* A cobertura mínima é de "pessoas",
+sem distinguir cargo, e todo o quadro da unidade conta para cobri-la. Continua valendo quando a cobertura
+não informa setores.
 
 **D-08 — Horário de funcionamento recorta a cobertura.** Horas de cobertura =
 Σ (interseção da faixa com o horário de funcionamento do dia) × pessoas. Faixas fora do horário não
 contam (e geram aviso). O cenário "reduzir horário" usa exatamente o mesmo cálculo com o horário reduzido.
 
-**D-09 — Sem virada de dia.** Horários vão de 00:00 a 24:00 no mesmo dia. Operações que atravessam a
-meia-noite devem ser informadas como duas faixas (até 24:00 e a partir de 00:00 do dia seguinte).
+**D-09 — Sem virada de dia.** *Substituída pela D-35.* Horários iam de 00:00 a 24:00 no mesmo dia, e
+operações que atravessavam a meia-noite eram informadas como duas faixas.
 
 **D-10 — Margem de segurança.** Aplicada multiplicando o FTE necessário: `FTE × (1 + margem)`.
 Padrão 5%. O caso de referência da seção 6 usa margem 0.
@@ -137,14 +139,17 @@ editável; cada empresa deve informar o seu.
 
 **D-20 — Perdas padrão 12%.** Igual ao caso de referência.
 
-**D-21 — Premissas por rede, não por unidade.** No MVP as premissas valem para toda a rede.
+**D-21 — Premissas por rede, não por unidade.** No MVP as premissas valem para toda a rede. Bandeira e
+regional (D-34) só agrupam o resultado; premissas por grupo ficam para depois.
 
 **D-22 — CSV.** Dois modelos: `cobertura.csv` (unidade;dia;inicio;fim;pessoas) e `quadro.csv`
 (unidade;cargo;quantidade;salario;jornada). Separador `;` ou `,` (detectado pelo cabeçalho), números
 no formato brasileiro (`2.500,00`) ou com ponto. `dia` aceita `seg..dom`, `todos` (atalho "mesma
 cobertura todos os dias") e `uteis` (seg–sex). O horário de funcionamento do dia é inferido como
 [menor início, maior fim] das faixas do dia. Unidades são criadas pelo nome; importar uma unidade
-existente substitui a cobertura/quadro dela (não mescla).
+existente substitui a cobertura/quadro dela (não mescla). Colunas opcionais (D-32 a D-35): `setor` nos
+dois arquivos; `semana` (`tipica` ou `pico`), `bandeira` e `regional` no `cobertura.csv`. A semana de pico
+e os grupos só são substituídos quando a coluna existe no arquivo. Fim menor que o início vira o dia (D-35).
 
 **D-23 — Moeda e arredondamento.** O motor trabalha com números sem arredondar; a interface e as
 exportações arredondam (BRL com 2 casas, FTE com 2 casas).
@@ -177,3 +182,39 @@ diferença entre as fases.
 
 **D-31 — Campo de horário na UI.** O `<input type="time">` não aceita 24:00; o valor 24:00 vindo do CSV é
 mantido até ser editado, quando passa a 23:59.
+
+**D-32 — Cobertura por setor.** Faixas de cobertura e cargos do quadro têm um `setor` opcional (texto
+livre, comparado sem diferença de maiúsculas e espaços nas pontas). Quando nenhuma faixa da unidade
+informa setor, o cálculo é o agregado da D-07 e o setor dos cargos é ignorado; o caso de referência não
+muda. Quando alguma faixa informa, cada setor é calculado com as próprias faixas e os próprios cargos:
+FTE necessário, FTE atual e delta por setor. Faixas e cargos sem setor formam o setor geral. A **sobra de
+um setor não cobre a falta de outro** dentro da unidade (açougueiro não cobre caixa), como a D-28 faz
+entre unidades: `deficitFte = Σ max(0, delta_setor)` é o que gera custo, e `deltaFte` continua sendo o
+saldo da unidade inteira. Custos por setor: contratar e hora extra usam o salário médio ponderado do
+setor (D-12 aplicada ao setor; setor sem quadro usa o da unidade e, sem quadro na unidade, o da rede).
+O limite de hora extra é avaliado por setor, dividindo as horas faltantes do setor pelas pessoas do
+setor. Se um setor com déficit não tem ninguém, o cenário de hora extra fica indisponível na unidade
+(entra com contratar no consolidado, D-27). Setor com cobertura e sem quadro, setor com quadro e sem
+cobertura e cargos sem setor numa cobertura com setores geram aviso. Premissa: pessoas não trocam de
+setor; polivalência fica fora.
+
+**D-33 — Semana de pico.** Cada unidade pode ter uma semana de pico (Natal, Páscoa, feriados) com
+descrição, horário e cobertura próprios. O motor calcula as mesmas fases com esse horário e essa
+cobertura e o **mesmo quadro**, em `fasesPico`. O consolidado de pico da rede (e de cada grupo) usa a
+semana de pico de quem a informou e a semana típica das demais. Os custos do pico são mensais como os
+demais, isto é, quanto custaria se a operação ficasse no pico o mês inteiro; servem para comparar
+alternativas e mostrar onde a hora extra estoura o limite legal, não para orçar o período. Escolhemos uma
+semana de pico, e não um calendário de sazonalidade, por ser o mínimo que responde "aguento o Natal?".
+
+**D-34 — Agrupamento por bandeira e regional.** A unidade tem `bandeira` e `regional` opcionais (texto
+livre, sem espaços nas pontas). O resultado traz um consolidado por grupo de cada tipo informado, com
+as mesmas regras do consolidado da rede (D-27, D-28); unidades sem o campo formam o grupo "sem
+bandeira"/"sem regional". Os grupos de um tipo somam a rede. Só dois níveis fixos, sem hierarquia.
+
+**D-35 — Turnos que viram o dia.** Numa janela de funcionamento ou numa faixa de cobertura, fim menor
+que o início significa que termina no dia seguinte (ex.: sexta 22:00–06:00). Início igual ao fim não é
+aceito (24 h = 00:00–24:00). A faixa pertence ao dia em que começa. As horas de cobertura são o recorte
+da faixa pelo funcionamento na **semana inteira** (domingo que vira o dia continua na segunda), então uma
+faixa lançada no sábado 00:00–06:00 também conta dentro do turno que abriu na sexta 22:00. Janelas que se
+sobrepõem na virada contam uma vez nas horas abertas. No CSV, o horário inferido de um dia vai do
+menor início ao maior fim; se isso passar de 24 h, a importação acusa erro.

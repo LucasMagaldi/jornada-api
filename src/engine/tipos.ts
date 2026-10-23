@@ -16,11 +16,15 @@ export const NOME_DIA: Record<DiaSemana, string> = {
   dom: "Domingo",
 };
 
-/** Horário no formato "HH:MM", de "00:00" a "24:00". */
+/**
+ * Horário no formato "HH:MM", de "00:00" a "24:00". Numa janela ou faixa, fim menor que o início
+ * significa que ela termina no dia seguinte (D-35).
+ */
 export type Hora = string;
 
 export interface Janela {
   abre: Hora;
+  /** Se for menor que `abre`, fecha no dia seguinte (D-35). */
   fecha: Hora;
 }
 
@@ -29,9 +33,12 @@ export type HorarioSemanal = Record<DiaSemana, Janela | null>;
 
 export interface Faixa {
   inicio: Hora;
+  /** Se for menor que `inicio`, a faixa termina no dia seguinte (D-35). */
   fim: Hora;
   /** Pessoas mínimas trabalhando simultaneamente na faixa. */
   pessoas: number;
+  /** Setor que precisa dessa cobertura (ex.: "Caixa", "Cozinha"). Vazio = geral (D-32). */
+  setor?: string;
 }
 
 /** Cobertura mínima por dia da semana. */
@@ -44,6 +51,16 @@ export interface Cargo {
   salarioBase: number;
   /** Jornada semanal contratada hoje, em horas. */
   jornadaSemanal: number;
+  /** Setor em que o cargo trabalha. Vazio = geral (D-32). */
+  setor?: string;
+}
+
+/** Semana de pico (Natal, feriados): horário e cobertura próprios (D-33). */
+export interface SemanaPico {
+  /** Ex.: "Natal", "Páscoa". */
+  descricao?: string;
+  horarios: HorarioSemanal;
+  cobertura: CoberturaSemanal;
 }
 
 export interface Unidade {
@@ -54,6 +71,11 @@ export interface Unidade {
   horarioReduzido?: HorarioSemanal | null;
   cobertura: CoberturaSemanal;
   quadro: Cargo[];
+  /** Agrupamentos para o consolidado (D-34). */
+  bandeira?: string | null;
+  regional?: string | null;
+  /** Semana de pico; `null` ou ausente = não informada (D-33). */
+  pico?: SemanaPico | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +156,20 @@ export interface ResultadoCenario {
   detalhes: Record<string, number | string | boolean>;
 }
 
+/** Parte da fotografia de uma unidade referente a um setor (D-32). */
+export interface ResultadoSetor {
+  /** Nome do setor; "" = geral (faixas e cargos sem setor). */
+  setor: string;
+  horasCoberturaSemana: number;
+  fteNecessario: number;
+  fteAtualEquivalente: number;
+  deltaFte: number;
+  headcount: number;
+  salarioMedio: number;
+  valorHora: number;
+  horasFaltantesSemana: number;
+}
+
 export interface ResultadoFase {
   fase: FaseLegal;
   divisorUsado: number;
@@ -143,11 +179,16 @@ export interface ResultadoFase {
   fteNecessario: number;
   fteNecessarioSemMargem: number;
   fteAtualEquivalente: number;
+  /** FTE necessário − FTE atual da unidade inteira (negativo = sobra). */
   deltaFte: number;
+  /** Soma dos déficits por setor: sobra num setor não cobre falta em outro (D-32). É o que gera custo. */
+  deficitFte: number;
   salarioMedio: number;
   valorHora: number;
   horasFaltantesSemana: number;
   horasFaltantesMes: number;
+  /** Uma entrada por setor; só "" quando a cobertura não usa setores. */
+  setores: ResultadoSetor[];
   cenarios: Record<IdCenario, ResultadoCenario>;
   /** Cenário disponível de menor custo. */
   maisBarato: IdCenario | null;
@@ -156,9 +197,13 @@ export interface ResultadoFase {
 export interface ResultadoUnidade {
   unidadeId: string;
   nome: string;
+  bandeira: string | null;
+  regional: string | null;
   headcountAtual: number;
   horasAbertasSemana: number;
   fases: ResultadoFase[];
+  /** Mesmas fases calculadas com a semana de pico; `null` se não informada (D-33). */
+  fasesPico: ResultadoFase[] | null;
   avisos: string[];
 }
 
@@ -183,11 +228,33 @@ export interface ResultadoFaseConsolidado {
   maisBarato: IdCenario | null;
 }
 
+export type TipoGrupo = "bandeira" | "regional";
+
+export interface ResultadoGrupo {
+  tipo: TipoGrupo;
+  /** "" = unidades sem bandeira/regional informada. */
+  nome: string;
+  unidadeIds: string[];
+  consolidado: ResultadoFaseConsolidado[];
+  /** Consolidado da semana de pico do grupo (unidades sem pico entram com a semana típica). */
+  consolidadoPico: ResultadoFaseConsolidado[] | null;
+}
+
+export interface ResultadoPicoRede {
+  unidadesComPico: number;
+  /** Unidades sem pico informado entram com a semana típica. */
+  consolidado: ResultadoFaseConsolidado[];
+}
+
 export interface ResultadoRede {
   versaoRegras: VersaoRegras;
   premissas: Premissas;
   unidades: ResultadoUnidade[];
   consolidado: ResultadoFaseConsolidado[];
+  /** `null` se nenhuma unidade tem semana de pico (D-33). */
+  pico: ResultadoPicoRede | null;
+  /** Consolidados por bandeira e por regional; vazio se nenhuma unidade tem grupo (D-34). */
+  grupos: ResultadoGrupo[];
   headcountAtual: number;
   avisos: string[];
 }

@@ -7,4 +7,4 @@ export * from "./regras";
 export * from "./cobertura";
 export * from "./premissas";
 export * from "./calculo";
-export { calcularRede, consolidar } from "./consolidado";
+export { agrupar, calcularRede, consolidar, semanaPico, semanaTipica } from "./consolidado";

@@ -52,18 +52,18 @@ describe("recorte da faixa pelo horário de funcionamento (D-08)", () => {
 
 describe("avisos de cobertura", () => {
   const horarios = { ...horarioVazio(), seg: { abre: "08:00", fecha: "18:00" }, ter: { abre: "08:00", fecha: "18:00" } };
-  it("detecta faixa fora do horário, sobreposição, fim antes do início, pessoas inválidas e dia sem cobertura", () => {
+  it("detecta faixa fora do horário, sobreposição, faixa sem duração, pessoas inválidas e dia sem cobertura", () => {
     const c = coberturaVazia();
     c.seg = [
       { inicio: "07:00", fim: "10:00", pessoas: 2 },
       { inicio: "09:00", fim: "12:00", pessoas: 1 },
-      { inicio: "14:00", fim: "13:00", pessoas: 1 },
+      { inicio: "13:00", fim: "13:00", pessoas: 1 },
       { inicio: "15:00", fim: "16:00", pessoas: -1 },
     ];
     const avisos = validarCobertura(c, horarios).join("\n");
     expect(avisos).toMatch(/fora do horário/);
     expect(avisos).toMatch(/sobrepostas/);
-    expect(avisos).toMatch(/fim antes do início/);
+    expect(avisos).toMatch(/início igual ao fim/);
     expect(avisos).toMatch(/pessoas inválido/);
     expect(avisos).toMatch(/ter: unidade aberta sem cobertura/);
   });

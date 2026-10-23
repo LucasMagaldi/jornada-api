@@ -45,12 +45,17 @@ model Unidade {
   redeId          String
   rede            Rede     @relation(fields: [redeId], references: [id], onDelete: Cascade)
   nome            String
+  /// Agrupamentos do consolidado (D-34)
+  bandeira        String?
+  regional        String?
   /// HorarioSemanal
   horarios        Json
   /// HorarioSemanal | null — usado no cenário "reduzir horário"
   horarioReduzido Json?
-  /// CoberturaSemanal
+  /// CoberturaSemanal (faixas podem ter setor, D-32)
   cobertura       Json
+  /// SemanaPico | null (D-33)
+  pico            Json?
   cargos          Cargo[]
   criadoEm        DateTime @default(now())
   atualizadoEm    DateTime @updatedAt
@@ -64,6 +69,8 @@ model Cargo {
   unidadeId      String
   unidade        Unidade @relation(fields: [unidadeId], references: [id], onDelete: Cascade)
   nome           String
+  /// Setor (D-32); null = geral
+  setor          String?
   quantidade     Int
   salarioBase    Decimal @db.Decimal(12, 2)
   jornadaSemanal Decimal @db.Decimal(5, 2)

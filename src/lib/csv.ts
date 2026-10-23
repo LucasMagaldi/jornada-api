@@ -2,24 +2,32 @@
  * Importação de CSV (D-22). Puro: recebe texto e devolve estruturas do motor + erros.
  * Mensagens de erro citam linha e coluna, nunca o valor (salário é dado sensível, D-24).
  */
-import { coberturaVazia, DIAS_SEMANA, horaParaMinutos, horarioVazio, minutosParaHora } from "../engine";
-import type { Cargo, CoberturaSemanal, DiaSemana, HorarioSemanal } from "../engine";
+import { coberturaVazia, DIAS_SEMANA, horaParaMinutos, horarioVazio, intervaloNoDia, minutosParaHora } from "../engine";
+import type { Cargo, CoberturaSemanal, DiaSemana, HorarioSemanal, SemanaPico } from "../engine";
 
 export const CABECALHO_COBERTURA = ["unidade", "dia", "inicio", "fim", "pessoas"] as const;
 export const CABECALHO_QUADRO = ["unidade", "cargo", "quantidade", "salario", "jornada"] as const;
 
-export const MODELO_COBERTURA = `unidade;dia;inicio;fim;pessoas
-Loja Centro;todos;08:00;12:00;2
-Loja Centro;todos;12:00;14:00;3
-Loja Centro;todos;14:00;22:00;2
-Loja Bairro;uteis;09:00;19:00;2
-Loja Bairro;sab;09:00;14:00;2
+/** Colunas opcionais: setor (D-32), semana (D-33), bandeira e regional (D-34). */
+export const MODELO_COBERTURA = `unidade;dia;inicio;fim;pessoas;setor;semana;bandeira;regional
+Loja Centro;todos;08:00;12:00;2;;;Bandeira A;Sul
+Loja Centro;todos;12:00;14:00;3;;;;
+Loja Centro;todos;14:00;22:00;2;;;;
+Loja Centro;todos;08:00;23:00;3;;pico;;
+Loja Bairro;uteis;09:00;19:00;2;Caixa;;Bandeira A;Sul
+Loja Bairro;uteis;09:00;19:00;1;Padaria;;;
+Loja Bairro;sab;09:00;14:00;2;Caixa;;;
+Loja Bairro;sab;09:00;14:00;1;Padaria;;;
+Posto Rodovia;todos;22:00;06:00;1;;;Conveniência;Sudeste
 `;
 
-export const MODELO_QUADRO = `unidade;cargo;quantidade;salario;jornada
-Loja Centro;Atendente;5;2.100,00;44
-Loja Centro;Caixa;2;1.950,00;44
-Loja Bairro;Atendente;3;2.000,00;44
+/** Coluna opcional: setor (D-32). */
+export const MODELO_QUADRO = `unidade;cargo;quantidade;salario;jornada;setor
+Loja Centro;Atendente;5;2.100,00;44;
+Loja Centro;Caixa;2;1.950,00;44;
+Loja Bairro;Operador de caixa;3;2.000,00;44;Caixa
+Loja Bairro;Padeiro;1;2.400,00;44;Padaria
+Posto Rodovia;Atendente;2;2.100,00;44;
 `;
 
 const ATALHOS_DIA: Record<string, DiaSemana[]> = {
@@ -93,6 +101,8 @@ export function lerNumeroBR(valor: string): number {
 }
 
 interface Tabela {
+  /** Colunas do cabeçalho, normalizadas. */
+  colunas: string[];
   linhas: { numero: number; campos: Record<string, string> }[];
   erros: string[];
 }
@@ -100,11 +110,11 @@ interface Tabela {
 function lerTabela(texto: string, esperado: readonly string[]): Tabela {
   const erros: string[] = [];
   const brutas = lerLinhas(texto, detectarSeparador(texto));
-  if (brutas.length === 0) return { linhas: [], erros: ["Arquivo vazio."] };
+  if (brutas.length === 0) return { colunas: [], linhas: [], erros: ["Arquivo vazio."] };
   const cabecalho = brutas[0].map(normalizar);
   const faltando = esperado.filter((c) => !cabecalho.includes(c));
   if (faltando.length > 0) {
-    return { linhas: [], erros: [`Cabeçalho inválido: faltam as colunas ${faltando.join(", ")}. Esperado: ${esperado.join(";")}`] };
+    return { colunas: cabecalho, linhas: [], erros: [`Cabeçalho inválido: faltam as colunas ${faltando.join(", ")}. Esperado: ${esperado.join(";")}`] };
   }
   const linhas: Tabela["linhas"] = [];
   brutas.slice(1).forEach((campos, i) => {
@@ -114,7 +124,7 @@ function lerTabela(texto: string, esperado: readonly string[]): Tabela {
     linhas.push({ numero: i + 2, campos: reg });
   });
   if (linhas.length === 0) erros.push("Nenhuma linha de dados.");
-  return { linhas, erros };
+  return { colunas: cabecalho, linhas, erros };
 }
 
 function lerDias(valor: string): DiaSemana[] | null {
@@ -138,52 +148,108 @@ export interface UnidadeImportada {
   nome: string;
   horarios: HorarioSemanal;
   cobertura: CoberturaSemanal;
+  /** `undefined` = arquivo sem a coluna `semana` (não mexer no pico); `null` = nenhuma linha de pico. */
+  pico?: SemanaPico | null;
+  /** `undefined` = arquivo sem a coluna; `null` = coluna vazia para a unidade. */
+  bandeira?: string | null;
+  regional?: string | null;
+}
+
+const MIN_DIA = 24 * 60;
+
+/**
+ * Horário de cada dia = [menor início, maior fim] das faixas do dia; o fim pode passar da
+ * meia-noite (D-35). Dias em que isso passa de 24 h voltam em `diasInvalidos`.
+ */
+function inferirHorarios(cobertura: CoberturaSemanal): { horarios: HorarioSemanal; diasInvalidos: DiaSemana[] } {
+  const horarios = horarioVazio();
+  const diasInvalidos: DiaSemana[] = [];
+  for (const dia of DIAS_SEMANA) {
+    const faixas = cobertura[dia];
+    if (faixas.length === 0) continue;
+    faixas.sort((a, b) => horaParaMinutos(a.inicio) - horaParaMinutos(b.inicio));
+    const intervalos = faixas.map((f) => intervaloNoDia(f.inicio, f.fim));
+    const abre = Math.min(...intervalos.map(([a]) => a));
+    const fecha = Math.max(...intervalos.map(([, b]) => b));
+    // 24 h só cabe como 00:00–24:00; 06:00–06:00 seria lido como janela vazia.
+    if (fecha - abre > MIN_DIA || (fecha - abre === MIN_DIA && abre > 0)) {
+      diasInvalidos.push(dia);
+      continue;
+    }
+    horarios[dia] = { abre: minutosParaHora(abre), fecha: minutosParaHora(fecha > MIN_DIA ? fecha - MIN_DIA : fecha) };
+  }
+  return { horarios, diasInvalidos };
+}
+
+interface Acumulado {
+  nome: string;
+  cobertura: CoberturaSemanal;
+  pico: CoberturaSemanal;
+  temPico: boolean;
+  bandeira: string;
+  regional: string;
 }
 
 /**
- * cobertura.csv → unidades com cobertura e horário de funcionamento inferido
- * ([menor início, maior fim] das faixas do dia).
+ * cobertura.csv → unidades com cobertura e horário de funcionamento inferido. Colunas opcionais:
+ * `setor` (D-32), `semana` = tipica | pico (D-33), `bandeira` e `regional` (D-34).
  */
 export function importarCobertura(texto: string): { unidades: UnidadeImportada[]; erros: string[] } {
-  const { linhas, erros } = lerTabela(texto, CABECALHO_COBERTURA);
-  const porNome = new Map<string, UnidadeImportada>();
+  const { colunas, linhas, erros } = lerTabela(texto, CABECALHO_COBERTURA);
+  const porNome = new Map<string, Acumulado>();
   for (const { numero, campos } of linhas) {
     const nome = campos.unidade;
     const dias = lerDias(campos.dia);
     const pessoas = lerNumeroBR(campos.pessoas);
+    const semana = normalizar(campos.semana ?? "");
     const errosLinha: string[] = [];
     if (!nome) errosLinha.push("unidade vazia");
     if (!dias) errosLinha.push("dia inválido (use seg..dom, todos, uteis ou fds)");
     if (!horaValida(campos.inicio)) errosLinha.push("inicio inválido (HH:MM)");
     if (!horaValida(campos.fim)) errosLinha.push("fim inválido (HH:MM)");
-    else if (horaValida(campos.inicio) && horaParaMinutos(campos.fim) <= horaParaMinutos(campos.inicio)) {
-      errosLinha.push("fim deve ser depois do início (sem virada de dia; ver D-09)");
+    else if (horaValida(campos.inicio) && horaParaMinutos(campos.fim) === horaParaMinutos(campos.inicio)) {
+      errosLinha.push("fim igual ao início (24 h = 00:00 a 24:00; fim antes do início vira o dia, D-35)");
     }
     if (!Number.isInteger(pessoas) || pessoas < 0) errosLinha.push("pessoas deve ser inteiro ≥ 0");
+    if (!["", "tipica", "pico"].includes(semana)) errosLinha.push("semana inválida (use tipica ou pico)");
     if (errosLinha.length > 0) {
       erros.push(`Linha ${numero}: ${errosLinha.join("; ")}.`);
       continue;
     }
     let u = porNome.get(nome);
     if (!u) {
-      u = { nome, horarios: horarioVazio(), cobertura: coberturaVazia() };
+      u = { nome, cobertura: coberturaVazia(), pico: coberturaVazia(), temPico: false, bandeira: "", regional: "" };
       porNome.set(nome, u);
     }
+    for (const grupo of ["bandeira", "regional"] as const) {
+      const valor = (campos[grupo] ?? "").trim();
+      if (!valor) continue;
+      if (u[grupo] && u[grupo] !== valor) erros.push(`Linha ${numero}: ${grupo} diferente da informada em outra linha da mesma unidade.`);
+      else u[grupo] = valor;
+    }
+    if (semana === "pico") u.temPico = true;
+    const destino = semana === "pico" ? u.pico : u.cobertura;
+    const setor = (campos.setor ?? "").trim();
     for (const dia of dias!) {
-      u.cobertura[dia].push({ inicio: campos.inicio, fim: campos.fim, pessoas });
+      destino[dia].push({ inicio: campos.inicio, fim: campos.fim, pessoas, ...(setor ? { setor } : {}) });
     }
   }
+  const unidades: UnidadeImportada[] = [];
   for (const u of porNome.values()) {
-    for (const dia of DIAS_SEMANA) {
-      const faixas = u.cobertura[dia];
-      if (faixas.length === 0) continue;
-      faixas.sort((a, b) => horaParaMinutos(a.inicio) - horaParaMinutos(b.inicio));
-      const abre = Math.min(...faixas.map((f) => horaParaMinutos(f.inicio)));
-      const fecha = Math.max(...faixas.map((f) => horaParaMinutos(f.fim)));
-      u.horarios[dia] = { abre: minutosParaHora(abre), fecha: minutosParaHora(fecha) };
+    const tipica = inferirHorarios(u.cobertura);
+    const pico = inferirHorarios(u.pico);
+    for (const [dias, rotulo] of [[tipica.diasInvalidos, ""], [pico.diasInvalidos, " (pico)"]] as const) {
+      for (const dia of dias) {
+        erros.push(`Unidade "${u.nome}", ${dia}${rotulo}: as faixas do dia passam de 24 h; lance a madrugada no dia em que o turno começa (D-35).`);
+      }
     }
+    const importada: UnidadeImportada = { nome: u.nome, horarios: tipica.horarios, cobertura: u.cobertura };
+    if (colunas.includes("semana")) importada.pico = u.temPico ? { horarios: pico.horarios, cobertura: u.pico } : null;
+    if (colunas.includes("bandeira")) importada.bandeira = u.bandeira || null;
+    if (colunas.includes("regional")) importada.regional = u.regional || null;
+    unidades.push(importada);
   }
-  return { unidades: [...porNome.values()], erros };
+  return { unidades, erros };
 }
 
 export interface QuadroImportado {
@@ -191,7 +257,7 @@ export interface QuadroImportado {
   cargos: Cargo[];
 }
 
-/** quadro.csv → cargos agrupados por unidade. */
+/** quadro.csv → cargos agrupados por unidade. Coluna opcional `setor` (D-32). */
 export function importarQuadro(texto: string): { quadros: QuadroImportado[]; erros: string[] } {
   const { linhas, erros } = lerTabela(texto, CABECALHO_QUADRO);
   const porNome = new Map<string, Cargo[]>();
@@ -210,7 +276,8 @@ export function importarQuadro(texto: string): { quadros: QuadroImportado[]; err
       continue;
     }
     const lista = porNome.get(campos.unidade) ?? [];
-    lista.push({ nome: campos.cargo, quantidade, salarioBase: salario, jornadaSemanal: jornada });
+    const setor = (campos.setor ?? "").trim();
+    lista.push({ nome: campos.cargo, quantidade, salarioBase: salario, jornadaSemanal: jornada, ...(setor ? { setor } : {}) });
     porNome.set(campos.unidade, lista);
   }
   return { quadros: [...porNome.entries()].map(([unidade, cargos]) => ({ unidade, cargos })), erros };

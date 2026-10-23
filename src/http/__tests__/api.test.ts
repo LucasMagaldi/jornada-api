@@ -88,6 +88,49 @@ describe.skipIf(!URL)("API (integração)", () => {
     expect(lista.find((u: { nome: string }) => u.nome === "Loja A").headcount).toBe(6);
   });
 
+  it("importação com setor, semana de pico, bandeira e regional", async () => {
+    const cobertura = `unidade;dia;inicio;fim;pessoas;setor;semana;bandeira;regional
+Mercado;todos;08:00;22:00;2;Caixa;;Premium;Sul
+Mercado;todos;08:00;22:00;1;Açougue;;;
+Mercado;todos;08:00;23:00;3;Caixa;pico;;
+Mercado;todos;08:00;23:00;1;Açougue;pico;;
+`;
+    const quadro = `unidade;cargo;quantidade;salario;jornada;setor
+Mercado;Operador de caixa;7;2.000,00;44;Caixa
+Mercado;Açougueiro;1;3.000,00;44;Açougue
+`;
+    const r = await app.inject({ method: "POST", url: "/importacao", headers: auth(), payload: { cobertura, quadro } });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().resumo.unidadesComPico).toEqual(["Mercado"]);
+    const sim = (await app.inject({ method: "GET", url: "/simulacao?data=2026-10-23", headers: auth() })).json().resultado;
+    const mercado = sim.unidades.find((u: { nome: string }) => u.nome === "Mercado");
+    expect(mercado.bandeira).toBe("Premium");
+    expect(mercado.fases[2].setores.map((s: { setor: string }) => s.setor)).toEqual(["Açougue", "Caixa"]);
+    expect(mercado.fases[2].deficitFte).toBeGreaterThan(mercado.fases[2].deltaFte);
+    expect(mercado.fasesPico[2].horasCoberturaSemana).toBe(15 * 7 * 4);
+    expect(sim.pico.unidadesComPico).toBe(1);
+    expect(sim.grupos.map((g: { tipo: string; nome: string }) => `${g.tipo}:${g.nome}`)).toEqual(["bandeira:Premium", "bandeira:", "regional:Sul", "regional:"]);
+
+    // descrição do pico é mantida ao reimportar; sem a coluna semana, o pico não muda
+    const u = (await app.inject({ method: "GET", url: "/unidades", headers: auth() })).json().find((x: { nome: string }) => x.nome === "Mercado");
+    const completa = (await app.inject({ method: "GET", url: `/unidades/${u.id}`, headers: auth() })).json();
+    await app.inject({ method: "PUT", url: `/unidades/${u.id}`, headers: auth(), payload: { ...completa, pico: { ...completa.pico, descricao: "Natal" } } });
+    await app.inject({ method: "POST", url: "/importacao", headers: auth(), payload: { cobertura } });
+    expect((await app.inject({ method: "GET", url: `/unidades/${u.id}`, headers: auth() })).json().pico.descricao).toBe("Natal");
+    await app.inject({ method: "POST", url: "/importacao", headers: auth(), payload: { cobertura: "unidade;dia;inicio;fim;pessoas\nMercado;todos;08:00;22:00;3\n" } });
+    const depois = (await app.inject({ method: "GET", url: `/unidades/${u.id}`, headers: auth() })).json();
+    expect(depois.pico.descricao).toBe("Natal");
+    expect(depois.bandeira).toBe("Premium");
+
+    const csv = (await app.inject({ method: "GET", url: "/relatorio.csv", headers: auth() })).body;
+    expect(csv).toContain("SETORES (D-32)");
+    expect(csv).toContain("BANDEIRA: Premium (consolidado)");
+    expect(csv).toContain(";pico;");
+    const pdf = await app.inject({ method: "GET", url: "/relatorio.pdf", headers: auth() });
+    expect(pdf.statusCode).toBe(200);
+    await app.inject({ method: "DELETE", url: `/unidades/${u.id}`, headers: auth() });
+  });
+
   it("critério 3: premissas alteradas recalculam sem salvar; PUT persiste", async () => {
     const base = (await app.inject({ method: "GET", url: "/simulacao", headers: auth() })).json().resultado.consolidado[2];
     const outra = (await app.inject({ method: "POST", url: "/simulacao", headers: auth(), payload: { premissas: { perdas: 0.25, adicionalHoraExtra: 1 } } })).json().resultado.consolidado[2];
@@ -127,8 +170,28 @@ describe.skipIf(!URL)("API (integração)", () => {
     const criada = await app.inject({ method: "POST", url: "/unidades", headers: auth(), payload: nova });
     expect(criada.statusCode).toBe(201);
     const id = criada.json().id;
-    const ruim = await app.inject({ method: "PUT", url: `/unidades/${id}`, headers: auth(), payload: { ...nova, horarios: { ...fechado, seg: { abre: "18:00", fecha: "08:00" } } } });
+    const ruim = await app.inject({ method: "PUT", url: `/unidades/${id}`, headers: auth(), payload: { ...nova, horarios: { ...fechado, seg: { abre: "08:00", fecha: "08:00" } } } });
     expect(ruim.statusCode).toBe(400);
+    // D-32 a D-35: setor, pico, grupos e turno que vira o dia
+    const completa = {
+      ...nova,
+      bandeira: " Premium ",
+      regional: "Sul",
+      horarios: { ...fechado, seg: { abre: "18:00", fecha: "02:00" } },
+      cobertura: { ...vazio, seg: [{ inicio: "18:00", fim: "02:00", pessoas: 2, setor: "Cozinha" }, { inicio: "18:00", fim: "02:00", pessoas: 1, setor: "" }] },
+      quadro: [{ ...nova.quadro[0], setor: "Cozinha" }],
+      pico: { descricao: "Natal", horarios: { ...fechado, seg: { abre: "18:00", fecha: "03:00" } }, cobertura: { ...vazio, seg: [{ inicio: "18:00", fim: "03:00", pessoas: 3 }] } },
+    };
+    const salva = (await app.inject({ method: "PUT", url: `/unidades/${id}`, headers: auth(), payload: completa })).json();
+    expect(salva.bandeira).toBe("Premium");
+    expect(salva.cobertura.seg).toEqual([{ inicio: "18:00", fim: "02:00", pessoas: 2, setor: "Cozinha" }, { inicio: "18:00", fim: "02:00", pessoas: 1 }]);
+    expect(salva.quadro[0].setor).toBe("Cozinha");
+    expect(salva.pico.descricao).toBe("Natal");
+    const resumo = (await app.inject({ method: "GET", url: "/unidades", headers: auth() })).json().find((u: { id: string }) => u.id === id);
+    expect(resumo).toMatchObject({ temPico: true, bandeira: "Premium", regional: "Sul", horasAbertasSemana: 8 });
+    const semPico = (await app.inject({ method: "PUT", url: `/unidades/${id}`, headers: auth(), payload: { ...completa, pico: null, bandeira: "" } })).json();
+    expect(semPico.pico).toBeNull();
+    expect(semPico.bandeira).toBeNull();
     const red = await app.inject({ method: "PUT", url: `/unidades/${id}`, headers: auth(), payload: { ...nova, horarioReduzido: { ...fechado, seg: { abre: "09:00", fecha: "17:00" } } } });
     expect(red.json().horarioReduzido.seg.abre).toBe("09:00");
     const semRed = await app.inject({ method: "PUT", url: `/unidades/${id}`, headers: auth(), payload: { ...nova, horarioReduzido: null } });

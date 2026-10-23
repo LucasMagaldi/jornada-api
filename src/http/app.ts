@@ -36,27 +36,36 @@ const zHora = z.string().refine((h) => {
   }
 }, "Horário inválido (HH:MM)");
 
+// Fechamento antes da abertura vira o dia (D-35); igual não tem duração.
 const zJanela = z
   .object({ abre: zHora, fecha: zHora })
-  .refine((j) => horaParaMinutos(j.fecha) > horaParaMinutos(j.abre), "Fechamento deve ser depois da abertura")
+  .refine((j) => horaParaMinutos(j.fecha) !== horaParaMinutos(j.abre), "Abertura e fechamento iguais (24 h = 00:00 a 24:00)")
   .nullable();
 const zHorario = z.object(Object.fromEntries(DIAS_SEMANA.map((d) => [d, zJanela])) as Record<(typeof DIAS_SEMANA)[number], typeof zJanela>);
+const zSetor = z.string().trim().max(60).optional();
 const zFaixa = z
-  .object({ inicio: zHora, fim: zHora, pessoas: z.number().int().min(0).max(1000) })
-  .refine((f) => horaParaMinutos(f.fim) > horaParaMinutos(f.inicio), "Fim da faixa deve ser depois do início");
-const zCobertura = z.object(Object.fromEntries(DIAS_SEMANA.map((d) => [d, z.array(zFaixa).max(48)])) as Record<(typeof DIAS_SEMANA)[number], z.ZodArray<typeof zFaixa>>);
+  .object({ inicio: zHora, fim: zHora, pessoas: z.number().int().min(0).max(1000), setor: zSetor })
+  .refine((f) => horaParaMinutos(f.fim) !== horaParaMinutos(f.inicio), "Início e fim da faixa iguais (24 h = 00:00 a 24:00)")
+  .transform(({ setor, ...f }) => (setor ? { ...f, setor } : f));
+const zCobertura = z.object(Object.fromEntries(DIAS_SEMANA.map((d) => [d, z.array(zFaixa).max(96)])) as Record<(typeof DIAS_SEMANA)[number], z.ZodArray<typeof zFaixa>>);
 const zCargo = z.object({
   nome: z.string().trim().min(1).max(100),
   quantidade: z.number().int().min(0).max(100000),
   salarioBase: z.number().positive().max(1_000_000),
   jornadaSemanal: z.number().positive().max(44),
+  setor: zSetor,
 });
+const zPico = z.object({ descricao: z.string().trim().max(60).optional(), horarios: zHorario, cobertura: zCobertura });
+const zGrupo = z.string().trim().max(80).nullable().optional();
 const zUnidade = z.object({
   nome: z.string().trim().min(1).max(120),
   horarios: zHorario,
   horarioReduzido: zHorario.nullable().optional(),
   cobertura: zCobertura,
   quadro: z.array(zCargo).max(200),
+  bandeira: zGrupo,
+  regional: zGrupo,
+  pico: zPico.nullable().optional(),
 });
 const zPremissas = z
   .object({
@@ -246,6 +255,9 @@ export async function criarApp({ db, logger = false, origemUi, cookieSeguro = fa
         headcount: u.quadro.reduce((s, c) => s + c.quantidade, 0),
         horasAbertasSemana: horasAbertasSemana(u.horarios),
         temHorarioReduzido: !!u.horarioReduzido,
+        temPico: !!u.pico,
+        bandeira: u.bandeira ?? null,
+        regional: u.regional ?? null,
       }));
     });
 
@@ -258,9 +270,12 @@ export async function criarApp({ db, logger = false, origemUi, cookieSeguro = fa
         data: {
           redeId: redeId(req),
           nome: u.nome,
+          bandeira: u.bandeira || null,
+          regional: u.regional || null,
           horarios: json(u.horarios),
           horarioReduzido: u.horarioReduzido ? json(u.horarioReduzido) : undefined,
           cobertura: json(u.cobertura),
+          pico: u.pico ? json(u.pico) : undefined,
           cargos: { create: cargosParaDb(u.quadro) },
         },
         include: { cargos: true },
@@ -279,9 +294,12 @@ export async function criarApp({ db, logger = false, origemUi, cookieSeguro = fa
           where: { id: req.params.id },
           data: {
             nome: u.nome,
+            bandeira: u.bandeira || null,
+            regional: u.regional || null,
             horarios: json(u.horarios),
             horarioReduzido: u.horarioReduzido ? json(u.horarioReduzido) : Prisma.DbNull,
             cobertura: json(u.cobertura),
+            pico: u.pico ? json(u.pico) : Prisma.DbNull,
             cargos: { create: cargosParaDb(u.quadro) },
           },
           include: { cargos: true },
@@ -307,7 +325,7 @@ export async function criarApp({ db, logger = false, origemUi, cookieSeguro = fa
       const qua = dados.quadro ? importarQuadro(dados.quadro) : { quadros: [], erros: [] };
       const erros = [...cob.erros.map((e) => `cobertura.csv — ${e}`), ...qua.erros.map((e) => `quadro.csv — ${e}`)];
 
-      const existentes = await db.unidade.findMany({ where: { redeId: redeId(req) }, select: { id: true, nome: true } });
+      const existentes = await db.unidade.findMany({ where: { redeId: redeId(req) }, select: { id: true, nome: true, pico: true } });
       const nomesExistentes = new Set(existentes.map((u) => u.nome));
       const nomesCobertura = new Set(cob.unidades.map((u) => u.nome));
       for (const q of qua.quadros) {
@@ -319,18 +337,24 @@ export async function criarApp({ db, logger = false, origemUi, cookieSeguro = fa
         unidadesNovas: cob.unidades.filter((u) => !nomesExistentes.has(u.nome)).map((u) => u.nome),
         unidadesAtualizadas: [...new Set([...cob.unidades.map((u) => u.nome), ...qua.quadros.map((q) => q.unidade)])].filter((n) => nomesExistentes.has(n)),
         linhasQuadro: qua.quadros.reduce((s, q) => s + q.cargos.length, 0),
+        unidadesComPico: cob.unidades.filter((u) => u.pico).map((u) => u.nome),
       };
       if (erros.length) throw new ErroHttp(422, "O arquivo tem erros; nada foi importado", erros);
       if (dados.simular) return { ok: true, simulado: true, resumo };
 
       await db.$transaction(async (tx) => {
         const ids = new Map(existentes.map((u) => [u.nome, u.id]));
+        const picoAntes = new Map(existentes.map((u) => [u.nome, u.pico as { descricao?: string } | null]));
         for (const u of cob.unidades) {
           const id = ids.get(u.nome);
+          // Pico e grupos só mudam quando o arquivo tem a coluna (D-22); a descrição do pico é mantida.
+          const descricao = picoAntes.get(u.nome)?.descricao;
+          const pico = u.pico === undefined ? undefined : u.pico ? json({ ...(descricao ? { descricao } : {}), ...u.pico }) : Prisma.DbNull;
+          const dados = { horarios: json(u.horarios), cobertura: json(u.cobertura), pico, bandeira: u.bandeira, regional: u.regional };
           if (id) {
-            await tx.unidade.update({ where: { id }, data: { horarios: json(u.horarios), cobertura: json(u.cobertura) } });
+            await tx.unidade.update({ where: { id }, data: dados });
           } else {
-            const criada = await tx.unidade.create({ data: { redeId: redeId(req), nome: u.nome, horarios: json(u.horarios), cobertura: json(u.cobertura) } });
+            const criada = await tx.unidade.create({ data: { redeId: redeId(req), nome: u.nome, ...dados } });
             ids.set(u.nome, criada.id);
           }
         }

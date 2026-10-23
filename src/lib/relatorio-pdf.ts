@@ -1,7 +1,7 @@
 import PDFDocument from "pdfkit";
 import { NOME_CENARIO } from "../engine";
-import type { IdCenario, ResultadoRede } from "../engine";
-import { avisosRede, descreverPremissas, nomeCenario } from "./descricao";
+import type { IdCenario, ResultadoFase, ResultadoFaseConsolidado, ResultadoRede } from "../engine";
+import { avisosRede, descreverPremissas, nomeCenario, nomeGrupo } from "./descricao";
 import { formatarBRL, formatarData, formatarNumero } from "./formato";
 import { AVISO_JURIDICO, LIMITACOES } from "./textos";
 
@@ -75,6 +75,22 @@ function tabela(doc: Doc, cabecalho: string[], linhas: string[][], pesos: number
   doc.moveDown(0.5);
 }
 
+function tabelaConsolidado(doc: Doc, fases: ResultadoFaseConsolidado[]) {
+  const linhas: string[][] = [
+    ["Horas de cobertura/semana", ...fases.map((c) => formatarNumero(c.horasCoberturaSemana, 1))],
+    ["FTE necessário", ...fases.map((c) => formatarNumero(c.fteNecessario))],
+    ["FTE atual equivalente", ...fases.map((c) => formatarNumero(c.fteAtualEquivalente))],
+    ["Déficit de FTE", ...fases.map((c) => formatarNumero(c.deltaFte))],
+    ...IDS.map((id) => [`Custo mensal: ${NOME_CENARIO[id]}`, ...fases.map((c) => formatarBRL(c.custos[id]))]),
+    ["Melhor cenário por unidade", ...fases.map((c) => formatarBRL(c.custoMelhorPorUnidade))],
+    ["Mais barato", ...fases.map((c) => nomeCenario(c.maisBarato))],
+  ];
+  tabela(doc, ["", ...fases.map((c) => c.fase.nome)], linhas, [2.2, ...fases.map(() => 1)], (l, c) => {
+    const id = IDS[l - 4];
+    return c > 0 && id !== undefined && fases[c - 1].maisBarato === id;
+  });
+}
+
 export function gerarRelatorioPdf(r: ResultadoRede, nomeRede: string, data: string): Promise<Buffer> {
   const doc = new PDFDocument({ size: "A4", margin: MARGEM, info: { Title: `Simulação 6x1 - ${nomeRede}` } });
   const partes: Buffer[] = [];
@@ -89,21 +105,34 @@ export function gerarRelatorioPdf(r: ResultadoRede, nomeRede: string, data: stri
 
   // Consolidado
   titulo(doc, "Rede consolidada");
-  const fases = r.consolidado;
-  const linhasCons: string[][] = [
-    ["Horas de cobertura/semana", ...fases.map((c) => formatarNumero(c.horasCoberturaSemana, 1))],
-    ["FTE necessário", ...fases.map((c) => formatarNumero(c.fteNecessario))],
-    ["FTE atual equivalente", ...fases.map((c) => formatarNumero(c.fteAtualEquivalente))],
-    ["Déficit de FTE", ...fases.map((c) => formatarNumero(c.deltaFte))],
-    ...IDS.map((id) => [`Custo mensal: ${NOME_CENARIO[id]}`, ...fases.map((c) => formatarBRL(c.custos[id]))]),
-    ["Melhor cenário por unidade", ...fases.map((c) => formatarBRL(c.custoMelhorPorUnidade))],
-    ["Mais barato na rede", ...fases.map((c) => nomeCenario(c.maisBarato))],
-  ];
-  tabela(doc, ["", ...fases.map((c) => c.fase.nome)], linhasCons, [2.2, ...fases.map(() => 1)], (l, c) => {
-    const id = IDS[l - 4];
-    return c > 0 && id !== undefined && fases[c - 1].maisBarato === id;
-  });
+  tabelaConsolidado(doc, r.consolidado);
   paragrafo(doc, "Custos mensais adicionais em relação ao quadro atual. No consolidado, unidades sem o cenário (ex.: sem horário reduzido informado) entram com o custo de contratar.");
+
+  if (r.pico) {
+    titulo(doc, "Semana de pico");
+    tabelaConsolidado(doc, r.pico.consolidado);
+    paragrafo(
+      doc,
+      `${r.pico.unidadesComPico} unidade(s) com semana de pico informada; as demais entram com a semana típica. Custos mensais como se o pico durasse o mês inteiro: servem para comparar alternativas e ver onde a hora extra passa do limite legal (D-33).`,
+    );
+  }
+
+  for (const tipo of ["bandeira", "regional"] as const) {
+    const grupos = r.grupos.filter((g) => g.tipo === tipo);
+    if (grupos.length === 0) continue;
+    const ultima = r.consolidado.length - 1;
+    titulo(doc, `Por ${tipo} - ${r.consolidado[ultima].fase.nome}`);
+    tabela(
+      doc,
+      [tipo === "bandeira" ? "Bandeira" : "Regional", "Unid.", "Déficit FTE", ...IDS.map((id) => NOME_CENARIO[id]), "Melhor/unid."],
+      grupos.map((g) => {
+        const c = g.consolidado[ultima];
+        return [nomeGrupo(tipo, g.nome), String(g.unidadeIds.length), formatarNumero(c.deltaFte), ...IDS.map((id) => formatarBRL(c.custos[id])), formatarBRL(c.custoMelhorPorUnidade)];
+      }),
+      [1.8, 0.5, 0.8, 1.1, 1.1, 1.1, 1.1, 1.1],
+      (l, c) => c >= 3 && c < 3 + IDS.length && grupos[l].consolidado[ultima].maisBarato === IDS[c - 3],
+    );
+  }
 
   // Por unidade
   titulo(doc, "Por unidade");
@@ -112,8 +141,9 @@ export function gerarRelatorioPdf(r: ResultadoRede, nomeRede: string, data: stri
     doc.font("Helvetica-Bold").fontSize(10.5).fillColor(COR_TEXTO).text(limpar(u.nome), MARGEM);
     paragrafo(doc, `${u.headcountAtual} colaboradores · ${formatarNumero(u.horasAbertasSemana, 1)} h de funcionamento/semana`);
     doc.moveDown(0.2);
-    const linhas: string[][] = u.fases.map((f) => [
-      f.fase.nome,
+    const comPico: [ResultadoFase, string][] = [...u.fases.map((f): [ResultadoFase, string] => [f, f.fase.nome]), ...(u.fasesPico ?? []).map((f): [ResultadoFase, string] => [f, `${f.fase.nome} (pico)`])];
+    const linhas: string[][] = comPico.map(([f, nome]) => [
+      nome,
       formatarNumero(f.horasCoberturaSemana, 1),
       formatarNumero(f.fteNecessario),
       formatarNumero(f.fteAtualEquivalente),
@@ -126,8 +156,13 @@ export function gerarRelatorioPdf(r: ResultadoRede, nomeRede: string, data: stri
       ["Fase", "Cob. (h)", "FTE nec.", "FTE at.", "Delta", "R$/hora", "Contratar", "H. extra", "Red. horário", "Mix"],
       linhas,
       [1.45, 0.7, 0.7, 0.7, 0.6, 0.9, 1.15, 1.15, 1.15, 1.15],
-      (l, c) => c >= 6 && u.fases[l].maisBarato === IDS[c - 6],
+      (l, c) => c >= 6 && comPico[l][0].maisBarato === IDS[c - 6],
     );
+    const ultima = u.fases[u.fases.length - 1];
+    if (ultima.setores.length > 1) {
+      const setores = ultima.setores.map((s) => `${s.setor || "geral"}: ${formatarNumero(s.deltaFte)} FTE (${s.headcount} pessoas)`).join(" · ");
+      paragrafo(doc, `Delta por setor, ${ultima.fase.nome}: ${setores}. Sobra num setor não cobre falta em outro (D-32).`, COR_SUAVE, 8);
+    }
     const avisos = [...u.avisos, ...u.fases.flatMap((f) => Object.values(f.cenarios).filter((c) => c.disponivel).flatMap((c) => c.avisos.map((a) => `${f.fase.nome}: ${a}`)))];
     for (const a of avisos) paragrafo(doc, `• ${a}`, "#b54708", 8);
     doc.moveDown(0.4);

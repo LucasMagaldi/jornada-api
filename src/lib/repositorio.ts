@@ -1,6 +1,6 @@
 import type { Cargo as CargoDb, Prisma, Unidade as UnidadeDb } from "@prisma/client";
 import { normalizarPremissas } from "../engine";
-import type { Cargo, CoberturaSemanal, HorarioSemanal, Premissas, Unidade, VersaoRegras } from "../engine";
+import type { Cargo, CoberturaSemanal, HorarioSemanal, Premissas, SemanaPico, Unidade, VersaoRegras } from "../engine";
 import type { Db } from "./db";
 
 type UnidadeComCargos = UnidadeDb & { cargos: CargoDb[] };
@@ -10,11 +10,15 @@ export function paraMotor(u: UnidadeComCargos): Unidade {
   return {
     id: u.id,
     nome: u.nome,
+    bandeira: u.bandeira,
+    regional: u.regional,
     horarios: u.horarios as unknown as HorarioSemanal,
     horarioReduzido: (u.horarioReduzido as unknown as HorarioSemanal | null) ?? null,
     cobertura: u.cobertura as unknown as CoberturaSemanal,
+    pico: (u.pico as unknown as SemanaPico | null) ?? null,
     quadro: u.cargos.map((c) => ({
       nome: c.nome,
+      ...(c.setor ? { setor: c.setor } : {}),
       quantidade: c.quantidade,
       salarioBase: Number(c.salarioBase),
       jornadaSemanal: Number(c.jornadaSemanal),
@@ -39,6 +43,7 @@ export async function carregarPremissas(db: Db, redeId: string, versao: VersaoRe
 export function cargosParaDb(quadro: Cargo[]): Prisma.CargoCreateWithoutUnidadeInput[] {
   return quadro.map((c) => ({
     nome: c.nome,
+    setor: c.setor?.trim() || null,
     quantidade: c.quantidade,
     salarioBase: c.salarioBase,
     jornadaSemanal: c.jornadaSemanal,
