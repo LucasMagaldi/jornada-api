@@ -85,3 +85,16 @@ citam linha e coluna, nunca valores de salário. `DELETE /conta` apaga tudo em c
 O cálculo é de dimensionamento agregado. Ele não gera escala nominal e não considera restrições de
 distribuição (domingos, descanso mínimo entre jornadas, folgas consecutivas), então pode subestimar o
 quadro em operações com picos concentrados. A margem de segurança configurável existe para mitigar isso.
+
+## Deploy (Render, plano grátis)
+
+`render.yaml` cria o Postgres, a API e a UI (repositório `jornada-ui`) como Blueprint:
+<https://dashboard.render.com/blueprint/new?repo=https://github.com/LucasMagaldi/jornada-api>.
+
+- A cada início, a API roda `prisma migrate deploy` e os dois seeds de demonstração
+  (`demo@exemplo.com` / `demo12345` e `marina@horizonte.com.br` / `horizonte123`). Os seeds só recriam
+  essas duas redes, mas tudo o que for alterado nelas volta ao estado inicial quando o serviço reinicia.
+- `API_URL` (UI) é lido no build. Se o Render der outro endereço à API, ajuste a variável e refaça o
+  deploy da UI. O mesmo vale para `UI_ORIGIN` na API.
+- No plano grátis, os serviços dormem quando ficam parados (o primeiro acesso leva cerca de 1 minuto) e o
+  Postgres expira em 30 dias. Para manter os dados, aponte `DATABASE_URL` para outro Postgres (ex.: Neon).

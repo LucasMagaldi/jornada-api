@@ -1,0 +1,50 @@
+# Blueprint do Render (plano grátis): Postgres + API + UI.
+# Criar em: https://dashboard.render.com/blueprint/new?repo=https://github.com/LucasMagaldi/jornada-api
+#
+# A cada início a API aplica as migrações e recria as duas redes de demonstração
+# (demo@exemplo.com e marina@horizonte.com.br). Outras redes não são tocadas.
+# Se o Render der outro endereço a um serviço (nome já usado), ajuste API_URL e UI_ORIGIN.
+
+databases:
+  - name: jornada-db
+    plan: free
+    region: virginia
+    databaseName: jornada
+    user: jornada
+
+services:
+  - type: web
+    name: jornada-6x1-api
+    runtime: node
+    plan: free
+    region: virginia
+    buildCommand: npm ci && npx prisma generate && npm run build
+    startCommand: npx prisma migrate deploy && npm run db:seed && npm run db:seed:prototipo && npm start
+    healthCheckPath: /saude
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: jornada-db
+          property: connectionString
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: UI_ORIGIN
+        value: https://jornada-6x1-ui.onrender.com
+
+  - type: web
+    name: jornada-6x1-ui
+    runtime: node
+    plan: free
+    region: virginia
+    repo: https://github.com/LucasMagaldi/jornada-ui
+    branch: main
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # Lido no build (rewrites do next.config.mjs): mudou o endereço da API, refaça o deploy da UI.
+      - key: API_URL
+        value: https://jornada-6x1-api.onrender.com
