@@ -239,3 +239,14 @@ para `/painel`), e quem já tem conta usa "Entrar". As datas e jornadas da linha
 `GET /publico/regras` (regra 3). Enquanto a API não responde, por exemplo quando o plano grátis acorda
 o serviço, a linha do tempo não mostra números. O contato do piloto vem de `NEXT_PUBLIC_CONTATO_EMAIL`.
 Sem essa variável, o botão leva ao cadastro. A página não divulga preço.
+
+**D-38 — Contato por WhatsApp.** Isto substitui o e-mail da D-37 (`NEXT_PUBLIC_CONTATO_EMAIL` foi
+removido). Os contatos da página pública levam ao WhatsApp comercial (`jornada-ui/src/lib/contato.ts`,
+via `wa.me`) com uma mensagem já escrita. Os pontos de contato são o topo da página, o piloto, um botão
+flutuante e o fim do diagnóstico. No diagnóstico, a mensagem leva um resumo que o próprio visitante decide
+enviar: segmento, número de unidades, pessoas que faltam na última fase e custo mais barato. Ela não
+leva salários. O número fica no código porque é público, aparece na página e não depende de build. O
+piloto continua com 3 a 5 unidades, e redes de 1 ou 2 lojas são convidadas a chamar no WhatsApp para
+um diagnóstico das próprias unidades. No resultado, cada fase mostra quantas pessoas a mais precisa em
+relação a hoje, a falta arredondada para pessoas inteiras por setor ("na prática") e o custo adicional
+do cenário mais barato em relação a hoje.
