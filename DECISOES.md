@@ -1,0 +1,179 @@
+# DECISÕES
+
+Registro das decisões de arquitetura e das premissas assumidas por falta de informação.
+Cada item tem um identificador para ser citado no código e em revisões.
+
+> A plataforma não emite parecer jurídico. Toda regra legal aqui é premissa a validar com o jurídico do cliente.
+
+---
+
+## 1. Estrutura
+
+O produto está em dois repositórios:
+
+- **jornada-api** (este): motor de cálculo, API HTTP, banco, importação CSV e exportação PDF/CSV.
+- **jornada-ui**: interface web (Next.js) que chama a API por um proxy `/api/*`.
+
+```
+jornada-api/
+├── config/
+│   └── regras-legais.json      # regras legais versionadas por vigência (D-03)
+├── prisma/
+│   ├── schema.prisma           # modelo de dados (seção 2)
+│   ├── migrations/
+│   └── seed.ts                 # rede de demonstração com 3 unidades
+├── src/
+│   ├── engine/                 # MOTOR DE CÁLCULO — TypeScript puro, sem I/O
+│   │   ├── tipos.ts            # tipos de entrada e saída
+│   │   ├── regras.ts           # validação e resolução das regras por vigência
+│   │   ├── cobertura.ts        # horas de cobertura (com recorte pelo horário)
+│   │   ├── premissas.ts        # premissas padrão e validação
+│   │   ├── calculo.ts          # fotografia por unidade/fase e 4 cenários
+│   │   ├── consolidado.ts      # soma da rede (ponto de entrada: calcularRede)
+│   │   └── __tests__/          # Vitest (caso de referência, tabelas, cenários)
+│   ├── lib/                    # aplicação: CSV, auth, repositório, relatórios
+│   ├── http/app.ts             # rotas Fastify (+ teste de integração)
+│   └── server.ts
+└── DECISOES.md
+```
+
+O motor (`src/engine`) não importa nada de fora da própria pasta, nem usa `process`, `console` ou
+`fetch`. Isso é verificado por teste (`isolamento.test.ts`).
+
+## 2. Modelo de dados (Postgres via Prisma)
+
+| Tabela       | Campos principais | Observação |
+|--------------|-------------------|------------|
+| `Rede`       | id, nome, premissas (JSON), criadoEm | 1 conta = 1 rede (multi-tenant básico) |
+| `Usuario`    | id, email (único), senhaHash, redeId | e-mail + senha (bcrypt) |
+| `Sessao`     | id, token (único), usuarioId, expiraEm | cookie httpOnly, 30 dias |
+| `Unidade`    | id, redeId, nome, horarios (JSON), horarioReduzido (JSON, opcional), cobertura (JSON) | nome único por rede |
+| `Cargo`      | id, unidadeId, nome, quantidade, salarioBase (Decimal), jornadaSemanal | "quadro atual" |
+
+Formato dos JSON (os mesmos tipos do motor, `src/engine/tipos.ts`):
+
+- `horarios`: `{ seg: { abre: "08:00", fecha: "22:00" } | null, ter: ..., dom: ... }`
+- `cobertura`: `{ seg: [ { inicio: "08:00", fim: "12:00", pessoas: 2 }, ... ], ... }`
+- `premissas`: ver `Premissas` em `tipos.ts`.
+
+Toda tabela filha usa `onDelete: Cascade` a partir da `Rede`, para que a exclusão a pedido (LGPD)
+apague tudo com uma operação.
+
+## 3. Decisões e premissas
+
+**D-01 — Stack.** API: Node 20+, TypeScript, Fastify 4, Prisma 5 + Postgres, Zod, Vitest, PDF no servidor
+com `pdfkit` (fontes padrão, sem navegador headless). UI: Next.js 14 (App Router), CSS próprio, sem
+framework de UI. Sem microserviços nem filas: são só um backend e um frontend.
+
+**D-02 — Recálculo sem salvar.** `POST /simulacao` recebe premissas não salvas e devolve o resultado
+completo; a UI chama a cada alteração (com 250 ms de espera). As regras legais e os dados não são
+recarregados pelo usuário (critério de aceite 3). "Salvar" persiste (`PUT /premissas`); as exportações
+usam as premissas salvas, e a UI bloqueia a exportação enquanto houver alteração não salva.
+
+**D-03 — Regras legais em arquivo versionado.** `config/regras-legais.json` contém uma lista de
+versões, cada uma com `vigenteDesde`. Vale a versão de maior `vigenteDesde` ≤ data de referência
+(hoje, por padrão). O arquivo é lido a cada requisição (sem cache e sem `import`), então alterar datas,
+jornadas ou divisores muda o cálculo sem mudança de código nem rebuild (critério de aceite 4).
+Escolhemos arquivo em vez de tabela porque mudanças de regra precisam de revisão (PR) e histórico (git).
+
+**D-04 — Datas das fases.** EC promulgada em 16/10/2026. Fase 1 = +60 dias = **15/12/2026**.
+Fase 2 = +12 meses após a fase 1 = **15/12/2027**. Contagem de prazo (inclusão do dia inicial)
+é premissa a validar.
+
+**D-05 — "Hoje".** A fotografia "hoje" usa 44 h semanais, 6 dias de trabalho, divisor 220.
+
+**D-06 — Divisores.** 220 (44h), 210 (42h), 200 (40h), como no documento de contexto. Ficam na
+configuração legal e podem ser sobrescritos nas premissas da rede. Sinalizados na interface como
+premissa a validar com o jurídico.
+
+**D-07 — Cobertura agregada, não por cargo.** A cobertura mínima é de "pessoas", sem distinguir cargo.
+Todo o quadro da unidade conta para cobri-la. Cobertura por cargo fica fora do MVP.
+
+**D-08 — Horário de funcionamento recorta a cobertura.** Horas de cobertura =
+Σ (interseção da faixa com o horário de funcionamento do dia) × pessoas. Faixas fora do horário não
+contam (e geram aviso). O cenário "reduzir horário" usa exatamente o mesmo cálculo com o horário reduzido.
+
+**D-09 — Sem virada de dia.** Horários vão de 00:00 a 24:00 no mesmo dia. Operações que atravessam a
+meia-noite devem ser informadas como duas faixas (até 24:00 e a partir de 00:00 do dia seguinte).
+
+**D-10 — Margem de segurança.** Aplicada multiplicando o FTE necessário: `FTE × (1 + margem)`.
+Padrão 5%. O caso de referência da seção 6 usa margem 0.
+
+**D-11 — FTE atual equivalente.** Em cada fase de jornada J:
+`Σ quantidade × min(jornada_atual, J) / J`. Quem hoje faz 44h passa a fazer no máximo J (sem redução
+salarial); quem faz menos que J mantém a jornada.
+
+**D-12 — Salário de referência.** Média dos salários-base ponderada pela quantidade de cada cargo da
+unidade. É usada tanto para contratar quanto para o valor-hora. Unidade sem quadro usa a média
+ponderada da rede (aviso exibido); se a rede inteira não tem quadro, custo = 0 com aviso.
+
+**D-13 — Custo de contratar.** `delta_FTE × salário_médio × fator_encargos` (mensal), exatamente como
+na especificação (FTE fracionado). Também exibimos `contratações inteiras = ⌈delta_FTE⌉` e o custo
+correspondente, porque na prática não se contrata fração de pessoa (pode-se contratar meio período,
+por isso o fracionado é o número principal). Delta ≤ 0 → custo 0 (sobra de quadro exibida).
+
+**D-14 — Horas faltantes para hora extra.** Horas extras são horas efetivamente trabalhadas, logo
+produtivas: `horas_faltantes_semana = delta_FTE × J × (1 − perdas)`.
+`horas_faltantes_mes = horas_faltantes_semana × 52/12`.
+
+**D-15 — Encargos sobre hora extra.** A fórmula da especificação não aplica encargos sobre a hora
+extra. Mantivemos a fórmula como padrão e criamos a premissa `encargosSobreHoraExtra` (padrão:
+desligada) porque, na prática, INSS/FGTS incidem sobre hora extra e isso muda a comparação.
+
+**D-16 — Limite de hora extra.** A configuração legal tem `limiteHoraExtraDiaria` (padrão 2h).
+Se as horas extras semanais necessárias por colaborador excederem `limite × dias de trabalho da fase`,
+o cenário é marcado como "acima do limite legal": continua visível, mas não é indicado como o mais barato.
+
+**D-17 — Reduzir horário.** Se a unidade tiver horário reduzido informado, recalcula-se a cobertura;
+o déficit remanescente (se houver) é coberto por contratação. Exibimos economia versus contratar e a
+perda de horas de atendimento (horas de porta aberta) e de horas de cobertura. Sem horário reduzido
+informado, o cenário aparece como "não informado".
+
+**D-18 — Mix.** `custo = p × custo_contratar + (1 − p) × custo_hora_extra`, com `p` premissa da rede
+(padrão 50%).
+
+**D-19 — Fator de encargos padrão 1,8.** (salário + ~80% de encargos e provisões). Valor genérico,
+editável; cada empresa deve informar o seu.
+
+**D-20 — Perdas padrão 12%.** Igual ao caso de referência.
+
+**D-21 — Premissas por rede, não por unidade.** No MVP as premissas valem para toda a rede.
+
+**D-22 — CSV.** Dois modelos: `cobertura.csv` (unidade;dia;inicio;fim;pessoas) e `quadro.csv`
+(unidade;cargo;quantidade;salario;jornada). Separador `;` ou `,` (detectado pelo cabeçalho), números
+no formato brasileiro (`2.500,00`) ou com ponto. `dia` aceita `seg..dom`, `todos` (atalho "mesma
+cobertura todos os dias") e `uteis` (seg–sex). O horário de funcionamento do dia é inferido como
+[menor início, maior fim] das faixas do dia. Unidades são criadas pelo nome; importar uma unidade
+existente substitui a cobertura/quadro dela (não mescla).
+
+**D-23 — Moeda e arredondamento.** O motor trabalha com números sem arredondar; a interface e as
+exportações arredondam (BRL com 2 casas, FTE com 2 casas).
+
+**D-24 — Privacidade.** Não há log de salários (nenhum `console.log` de dados de quadro; erros de
+importação citam linha e coluna, não o valor). Botão "Excluir conta e dados" remove a rede inteira.
+
+**D-25 — Autenticação.** Cadastro aberto (e-mail + senha ≥ 8 caracteres) cria a rede e o usuário.
+Sem recuperação de senha, papéis ou convites no MVP.
+
+**D-26 — Dois repositórios.** O cliente criou `jornada-api` e `jornada-ui`. A UI fala com a API por
+um *rewrite* do Next.js (`/api/*` → `API_URL`), de modo que o cookie de sessão é do mesmo domínio
+(httpOnly, `SameSite=Lax`) e não há CORS em produção. A API também aceita `Authorization: Bearer`.
+
+**D-27 — Consolidado de cenário indisponível.** No consolidado, uma unidade sem o cenário (ex.: sem
+horário reduzido informado, ou sem quadro para fazer hora extra) entra com o custo de contratar dela,
+e a interface mostra quantas unidades estão nessa situação. O "mais barato da rede" ignora cenários em
+que alguma unidade excede o limite legal de hora extra. Também exibimos o "melhor por unidade"
+(cada unidade no seu cenário mais barato), que é o piso de custo.
+
+**D-28 — Delta consolidado.** O déficit da rede soma só os déficits positivos: sobra de quadro numa
+unidade não cobre falta em outra (pessoas não se deslocam entre unidades no MVP).
+
+**D-29 — Tipos compartilhados.** `jornada-ui/src/lib/tipos.ts` é cópia de `src/engine/tipos.ts`. Não
+publicamos pacote compartilhado no MVP; ao mudar um, mude o outro.
+
+**D-30 — "Hoje" na fotografia.** O delta de "hoje" compara a necessidade com 44h contra o quadro atual;
+se a rede já está subdimensionada, isso aparece como custo já em "hoje". O impacto da mudança legal é a
+diferença entre as fases.
+
+**D-31 — Campo de horário na UI.** O `<input type="time">` não aceita 24:00; o valor 24:00 vindo do CSV é
+mantido até ser editado, quando passa a 23:59.

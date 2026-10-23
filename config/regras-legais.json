@@ -1,0 +1,47 @@
+{
+  "versoes": [
+    {
+      "id": "ec-2026-10-16",
+      "vigenteDesde": "2026-10-16",
+      "descricao": "Emenda constitucional promulgada em 16/10/2026: fim da escala 6x1, 42h na fase 1 e 40h na fase 2, sem redução salarial.",
+      "fonte": "Documento de contexto do projeto (premissa, não parecer jurídico)",
+      "fases": [
+        {
+          "id": "atual",
+          "nome": "Hoje (44h, 6x1)",
+          "inicio": null,
+          "jornadaSemanal": 44,
+          "jornadaDiariaMax": 8,
+          "diasTrabalhoSemana": 6,
+          "divisorHora": 220
+        },
+        {
+          "id": "fase1",
+          "nome": "Fase 1 (42h, 5x2)",
+          "inicio": "2026-12-15",
+          "jornadaSemanal": 42,
+          "jornadaDiariaMax": 8.4,
+          "diasTrabalhoSemana": 5,
+          "divisorHora": 210
+        },
+        {
+          "id": "fase2",
+          "nome": "Fase 2 (40h, 5x2)",
+          "inicio": "2027-12-15",
+          "jornadaSemanal": 40,
+          "jornadaDiariaMax": 8,
+          "diasTrabalhoSemana": 5,
+          "divisorHora": 200
+        }
+      ],
+      "limiteHoraExtraDiaria": 2,
+      "adicionalHoraExtraPadrao": 0.5,
+      "observacoes": [
+        "Datas: fase 1 = promulgação + 60 dias; fase 2 = fase 1 + 12 meses.",
+        "Divisores 220/210/200 são premissa a validar com o jurídico do cliente.",
+        "Convenções coletivas podem permitir jornada diária maior na transição, mantidos os dois dias de descanso.",
+        "Em aberto: lei complementar para micro e pequenas empresas e regimes diferenciados; terceirizadas de contratos públicos têm prazo de 12 meses."
+      ]
+    }
+  ]
+}

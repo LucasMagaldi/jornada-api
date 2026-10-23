@@ -1,0 +1,70 @@
+// Modelo de dados — ver DECISOES.md, seção 2.
+// Os campos JSON usam os mesmos tipos do motor (src/engine/tipos.ts).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Uma conta = uma rede (multi-tenant básico).
+model Rede {
+  id        String    @id @default(cuid())
+  nome      String
+  /// Premissas editáveis (Partial<Premissas>); ausentes usam o padrão do motor.
+  premissas Json      @default("{}")
+  criadoEm  DateTime  @default(now())
+  usuarios  Usuario[]
+  unidades  Unidade[]
+}
+
+model Usuario {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  senhaHash String
+  redeId    String
+  rede      Rede     @relation(fields: [redeId], references: [id], onDelete: Cascade)
+  sessoes   Sessao[]
+  criadoEm  DateTime @default(now())
+}
+
+model Sessao {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  usuarioId String
+  usuario   Usuario  @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  expiraEm  DateTime
+  criadoEm  DateTime @default(now())
+}
+
+model Unidade {
+  id              String   @id @default(cuid())
+  redeId          String
+  rede            Rede     @relation(fields: [redeId], references: [id], onDelete: Cascade)
+  nome            String
+  /// HorarioSemanal
+  horarios        Json
+  /// HorarioSemanal | null — usado no cenário "reduzir horário"
+  horarioReduzido Json?
+  /// CoberturaSemanal
+  cobertura       Json
+  cargos          Cargo[]
+  criadoEm        DateTime @default(now())
+  atualizadoEm    DateTime @updatedAt
+
+  @@unique([redeId, nome])
+}
+
+/// Linha do quadro atual de uma unidade.
+model Cargo {
+  id             String  @id @default(cuid())
+  unidadeId      String
+  unidade        Unidade @relation(fields: [unidadeId], references: [id], onDelete: Cascade)
+  nome           String
+  quantidade     Int
+  salarioBase    Decimal @db.Decimal(12, 2)
+  jornadaSemanal Decimal @db.Decimal(5, 2)
+}
