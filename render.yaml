@@ -48,3 +48,6 @@ services:
       # Lido no build (rewrites do next.config.mjs): mudou o endereço da API, refaça o deploy da UI.
       - key: API_URL
         value: https://jornada-6x1-api.onrender.com
+      # Contato do botão "Pedir um piloto" da página pública (D-37); definir no painel do Render.
+      - key: NEXT_PUBLIC_CONTATO_EMAIL
+        sync: false

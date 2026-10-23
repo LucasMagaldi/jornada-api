@@ -218,3 +218,24 @@ da faixa pelo funcionamento na **semana inteira** (domingo que vira o dia contin
 faixa lançada no sábado 00:00–06:00 também conta dentro do turno que abriu na sexta 22:00. Janelas que se
 sobrepõem na virada contam uma vez nas horas abertas. No CSV, o horário inferido de um dia vai do
 menor início ao maior fim; se isso passar de 24 h, a importação acusa erro.
+
+**D-36 — Diagnóstico rápido.** A página pública tem um diagnóstico de cerca de 3 minutos, sem CSV e sem
+conta, em `POST /publico/diagnostico`. O formulário é montado como **uma unidade comum do motor**
+(`src/lib/diagnostico.ts`), então o cálculo e as regras legais são os mesmos do simulador completo, sem
+uma segunda fórmula. Premissas do formulário: mesmo horário de segunda a sexta; sábado e domingo à parte
+(podem fechar ou virar o dia, D-35); as pessoas informadas trabalham ao mesmo tempo durante todo o
+horário, sem picos dentro do dia; um salário médio e uma jornada para todos. Há um setor obrigatório
+opcional (farmacêutico, açougue, cozinha) e, quando ele é informado, o resto da equipe vira o setor
+"Demais funções" e vale a D-32. A semana de pico opcional usa um horário para todos os dias e outra
+quantidade de pessoas para a equipe geral; o setor obrigatório mantém a sua. A rede é a unidade típica
+× N unidades: como unidades iguais não compensam entre si (D-28), o total é exato para esse caso. O
+cenário "reduzir horário" fica indisponível. As premissas são as padrão (D-10 a D-20), e a página pode
+alterar perdas, encargos, adicional e margem. Nada é gravado e não há captura de contato: a rota não usa
+banco e o corpo não vai para o log (D-24). O corpo é limitado a 16 KB. Não há limite de taxa porque o
+cálculo é barato; se houver abuso, a saída é `@fastify/rate-limit`.
+
+**D-37 — Página pública na raiz da UI.** `/` passou a ser a apresentação do produto (antes redirecionava
+para `/painel`), e quem já tem conta usa "Entrar". As datas e jornadas da linha do tempo vêm de
+`GET /publico/regras` (regra 3). Enquanto a API não responde, por exemplo quando o plano grátis acorda
+o serviço, a linha do tempo não mostra números. O contato do piloto vem de `NEXT_PUBLIC_CONTATO_EMAIL`.
+Sem essa variável, o botão leva ao cadastro. A página não divulga preço.

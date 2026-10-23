@@ -17,6 +17,7 @@ import { buscarUsuarioDaSessao, COOKIE_SESSAO, criarSessao, DURACAO_SESSAO_MS, e
 import { importarCobertura, importarQuadro, MODELO_COBERTURA, MODELO_QUADRO } from "../lib/csv";
 import type { Db } from "../lib/db";
 import { descreverPremissas } from "../lib/descricao";
+import { descreverDiagnostico, SETOR_DEMAIS, unidadeDoDiagnostico } from "../lib/diagnostico";
 import { carregarConfigRegras, hojeISO, versaoVigente } from "../lib/regras-loader";
 import { gerarRelatorioCsv } from "../lib/relatorio-csv";
 import { gerarRelatorioPdf } from "../lib/relatorio-pdf";
@@ -37,10 +38,10 @@ const zHora = z.string().refine((h) => {
 }, "Horário inválido (HH:MM)");
 
 // Fechamento antes da abertura vira o dia (D-35); igual não tem duração.
-const zJanela = z
+const zJanelaAberta = z
   .object({ abre: zHora, fecha: zHora })
-  .refine((j) => horaParaMinutos(j.fecha) !== horaParaMinutos(j.abre), "Abertura e fechamento iguais (24 h = 00:00 a 24:00)")
-  .nullable();
+  .refine((j) => horaParaMinutos(j.fecha) !== horaParaMinutos(j.abre), "Abertura e fechamento iguais (24 h = 00:00 a 24:00)");
+const zJanela = zJanelaAberta.nullable();
 const zHorario = z.object(Object.fromEntries(DIAS_SEMANA.map((d) => [d, zJanela])) as Record<(typeof DIAS_SEMANA)[number], typeof zJanela>);
 const zSetor = z.string().trim().max(60).optional();
 const zFaixa = z
@@ -78,6 +79,29 @@ const zPremissas = z
     encargosSobreHoraExtra: z.boolean(),
   })
   .partial();
+// Diagnóstico rápido da página pública (D-36).
+const zPessoas = z.number().int().min(0).max(500);
+const zQtd = z.number().int().min(0).max(10000);
+const zSalario = z.number().positive().max(1_000_000);
+const zDiagnostico = z
+  .object({
+    unidades: z.number().int().min(1).max(1000),
+    semana: zJanelaAberta,
+    sabado: zJanela,
+    domingo: zJanela,
+    pessoas: zPessoas,
+    colaboradores: zQtd,
+    salarioMedio: zSalario,
+    jornadaAtual: z.number().positive().max(44).default(44),
+    setor: z
+      .object({ nome: z.string().trim().min(1).max(60), pessoas: zPessoas.min(1), colaboradores: zQtd, salarioMedio: zSalario })
+      .refine((s) => s.nome.toLowerCase() !== SETOR_DEMAIS.toLowerCase(), `Escolha outro nome que não "${SETOR_DEMAIS}"`)
+      .nullable()
+      .optional(),
+    pico: z.object({ descricao: z.string().trim().max(60).optional(), janela: zJanelaAberta, pessoas: zPessoas }).nullable().optional(),
+    premissas: zPremissas.optional(),
+  })
+  .refine((d) => d.pessoas > 0 || !!d.setor, { message: "Informe quantas pessoas precisam estar trabalhando ao mesmo tempo", path: ["pessoas"] });
 const zData = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional();
 const zCredenciais = z.object({ email: z.string().trim().toLowerCase().email().max(200), senha: z.string().min(8).max(200) });
 
@@ -87,7 +111,7 @@ class ErroHttp extends Error {
   }
 }
 
-function validar<T>(schema: z.ZodType<T>, dados: unknown): T {
+function validar<S extends z.ZodTypeAny>(schema: S, dados: unknown): z.output<S> {
   const r = schema.safeParse(dados);
   if (!r.success) {
     throw new ErroHttp(400, "Dados inválidos", r.error.issues.map((i) => `${i.path.join(".") || "corpo"}: ${i.message}`));
@@ -175,6 +199,27 @@ export async function criarApp({ db, logger = false, origemUi, cookieSeguro = fa
   // ---- saúde e públicos ----------------------------------------------------
   app.get("/saude", async () => ({ ok: true }));
   app.get("/textos", async () => ({ avisoJuridico: AVISO_JURIDICO, limitacoes: LIMITACOES }));
+
+  // Página pública (D-36, D-37): regras vigentes e diagnóstico rápido, sem login e sem banco.
+  app.get("/publico/regras", async () => {
+    const dataRef = hojeISO();
+    return { dataReferencia: dataRef, vigente: versaoVigente(dataRef) };
+  });
+  app.post("/publico/diagnostico", { bodyLimit: 16 * 1024 }, async (req) => {
+    const { premissas: parcial, ...entrada } = validar(zDiagnostico, req.body);
+    const dataRef = hojeISO();
+    const versao = versaoVigente(dataRef);
+    const premissas = normalizarPremissas(parcial, versao);
+    const erros = validarPremissas(premissas);
+    if (erros.length) throw new ErroHttp(400, "Premissas inválidas", erros);
+    const resultado = calcularRede([unidadeDoDiagnostico(entrada)], versao, premissas);
+    return {
+      dataReferencia: dataRef,
+      unidades: entrada.unidades,
+      resultado,
+      premissasDescritas: [...descreverDiagnostico(entrada), ...descreverPremissas(premissas, versao)],
+    };
+  });
   app.get("/modelos/cobertura.csv", async (_req, reply) =>
     reply.header("content-type", "text/csv; charset=utf-8").header("content-disposition", 'attachment; filename="modelo-cobertura.csv"').send(MODELO_COBERTURA),
   );
